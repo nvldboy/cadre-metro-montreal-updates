@@ -1,0 +1,86 @@
+name: Mettre à jour le GTFS STM
+
+on:
+  schedule:
+    - cron: "17 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Récupérer le dépôt
+        uses: actions/checkout@v7
+
+      - name: Installer Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Télécharger le GTFS officiel de la STM
+        run: |
+          mkdir -p data
+          downloaded=0
+          for url in \
+            "https://www.stm.info/sites/default/files/gtfs/gtfs_stm.zip" \
+            "https://stm.info/sites/default/files/gtfs/gtfs_stm.zip"
+          do
+            echo "Téléchargement depuis ${url}"
+            if curl \
+              --fail \
+              --location \
+              --silent \
+              --show-error \
+              --connect-timeout 30 \
+              --max-time 600 \
+              --retry 4 \
+              --retry-delay 15 \
+              --retry-max-time 300 \
+              --retry-all-errors \
+              --user-agent "cadre-metro-montreal-gtfs-updater/1.0" \
+              --output data/gtfs_stm.zip \
+              "${url}" \
+              && unzip -tq data/gtfs_stm.zip
+            then
+              downloaded=1
+              break
+            fi
+            rm -f data/gtfs_stm.zip
+          done
+
+          if [ "${downloaded}" -ne 1 ]; then
+            echo "::error::Impossible de télécharger un GTFS STM valide."
+            exit 1
+          fi
+
+      - name: Construire l’horaire compact
+        run: |
+          python scripts/build_metro_schedule.py \
+            data/gtfs_stm.zip \
+            --output /tmp/metro_schedule_candidate.py
+
+      - name: Publier une véritable modification seulement
+        run: |
+          python scripts/publish_gtfs_update.py \
+            --candidate /tmp/metro_schedule_candidate.py
+
+      - name: Vérifier les fichiers publics
+        run: python -m unittest discover -s tests -v
+
+      - name: Enregistrer la nouvelle période
+        run: |
+          git add pico/metro_schedule_data.py updates/latest.json \
+            updates/metro_schedule_data.py
+          if git diff --cached --quiet; then
+            echo "Le GTFS publié est déjà à jour."
+            exit 0
+          fi
+          git config user.name "metro-gtfs-bot"
+          git config user.email "metro-gtfs-bot@users.noreply.github.com"
+          git commit -m "Mettre à jour l’horaire GTFS compact"
+          git push
